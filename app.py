@@ -1,7 +1,35 @@
 import streamlit as st
-import os, re, json, tempfile, urllib.request, urllib.parse
+import os, re, json, tempfile, urllib.request, urllib.parse, subprocess, shutil
 import xml.etree.ElementTree as ET
 from pathlib import Path
+
+# ── ffmpeg 路徑修正（Railway / Nix 環境）─────────────────────────
+def _fix_ffmpeg_path():
+    """確保 ffmpeg 在 PATH 裡，找不到就用 which/where 找"""
+    if shutil.which("ffmpeg"):
+        return  # 已經在 PATH，沒問題
+    # Nix 環境常見路徑
+    candidates = [
+        "/nix/var/nix/profiles/default/bin/ffmpeg",
+        "/usr/bin/ffmpeg",
+        "/usr/local/bin/ffmpeg",
+    ]
+    for p in candidates:
+        if Path(p).exists():
+            os.environ["PATH"] = str(Path(p).parent) + ":" + os.environ.get("PATH", "")
+            return
+    # 最後嘗試 find
+    try:
+        result = subprocess.run(["find", "/nix", "-name", "ffmpeg", "-type", "f"],
+                                capture_output=True, text=True, timeout=10)
+        for line in result.stdout.strip().splitlines():
+            if line.endswith("/ffmpeg"):
+                os.environ["PATH"] = str(Path(line).parent) + ":" + os.environ.get("PATH", "")
+                return
+    except Exception:
+        pass
+
+_fix_ffmpeg_path()
 
 st.set_page_config(
     page_title="Podcast AI 摘要",
