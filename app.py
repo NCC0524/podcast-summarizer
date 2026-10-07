@@ -155,8 +155,22 @@ def download_audio(url, dest, progress_cb=None):
 
 def transcribe(audio_path, model_size="base"):
     import whisper
+    import imageio_ffmpeg
+    import subprocess
+
+    # 先用 imageio_ffmpeg 內建的 ffmpeg 把音檔轉成 wav
+    ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+    wav_path = str(audio_path).rsplit(".", 1)[0] + ".wav"
+    subprocess.run(
+        [ffmpeg_exe, "-y", "-i", str(audio_path),
+         "-ar", "16000", "-ac", "1", "-f", "wav", wav_path],
+        check=True,
+        capture_output=True,
+    )
+
+    # Whisper 直接讀 wav，不需要呼叫系統 ffmpeg
     model = whisper.load_model(model_size)
-    result = model.transcribe(str(audio_path), language="zh", verbose=False, fp16=False)
+    result = model.transcribe(wav_path, language="zh", verbose=False, fp16=False)
     return result["text"].strip()
 
 def claude_summarize(transcript, ep_title, show_name, api_key):
