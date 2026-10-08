@@ -2,6 +2,8 @@ import streamlit as st
 import os, re, json, tempfile, urllib.request, urllib.parse
 import xml.etree.ElementTree as ET
 from pathlib import Path
+from datetime import datetime
+import io
 
 st.set_page_config(
     page_title="Podcast AI 摘要",
@@ -14,14 +16,6 @@ st.markdown("""
 <style>
 .main { max-width: 760px; }
 .stTextInput>div>div>input { font-size: 14px; }
-.report-box {
-    background: #f8f9fa;
-    border: 1px solid #e0e0e0;
-    border-radius: 10px;
-    padding: 1.5rem 2rem;
-    font-size: 14px;
-    line-height: 1.8;
-}
 .tag {
     display: inline-block;
     background: #e8f0fe;
@@ -32,9 +26,6 @@ st.markdown("""
     font-weight: 500;
     margin-bottom: 8px;
 }
-.stock-bull { color: #0f6e56; font-weight: 500; }
-.stock-bear { color: #c0392b; font-weight: 500; }
-.stock-neu  { color: #666;    font-weight: 500; }
 .section-title {
     font-size: 13px;
     font-weight: 600;
@@ -43,10 +34,23 @@ st.markdown("""
     padding-bottom: 4px;
     margin: 1rem 0 0.5rem 0;
 }
+.history-item {
+    padding: 6px 8px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 13px;
+    line-height: 1.4;
+}
 </style>
 """, unsafe_allow_html=True)
 
 HEADERS = {"User-Agent": "Mozilla/5.0"}
+
+# ── 初始化歷史記錄 ────────────────────────────────────────────────
+if "history" not in st.session_state:
+    st.session_state.history = []   # list of {data, ep, transcript, analyzed_at}
+if "result" not in st.session_state:
+    st.session_state.result = None
 
 # ── 工具函式 ──────────────────────────────────────────────────────
 
@@ -100,7 +104,6 @@ def find_episode(rss_url, episode_id, podcast_id):
         for ep in eps:
             if episode_id in ep["guid"] or episode_id in ep["url"]:
                 return ep, eps
-        # 用 iTunes Episode API 比對
         try:
             api = f"https://itunes.apple.com/lookup?id={episode_id}&entity=podcastEpisode"
             with urllib.request.urlopen(urllib.request.Request(api, headers=HEADERS), timeout=10) as r:
@@ -112,7 +115,7 @@ def find_episode(rss_url, episode_id, podcast_id):
                         return ep, eps
         except Exception:
             pass
-    return eps[0], eps  # fallback：最新一集
+    return eps[0], eps
 
 def resolve_url(url):
     low = url.lower()
@@ -125,19 +128,15 @@ def resolve_url(url):
         rss = get_rss_from_apple_id(pid)
         ep, all_eps = find_episode(rss, eid, pid)
         return ep, all_eps
-    # 當 RSS 處理
     eps = parse_rss(url)
     if not eps:
         raise ValueError("RSS 中找不到音檔")
     return eps[0], eps
 
 def transcribe_assemblyai(mp3_url, api_key):
-    """使用 AssemblyAI 雲端轉錄，直接傳 URL，不需本地 ffmpeg"""
     import assemblyai as aai
     aai.settings.api_key = api_key
-    config = aai.TranscriptionConfig(
-        language_detection=True,   # 自動偵測語言（含中文）
-    )
+    config = aai.TranscriptionConfig(language_detection=True)
     transcriber = aai.Transcriber(config=config)
     transcript = transcriber.transcribe(mp3_url)
     if transcript.status == aai.TranscriptStatus.error:
@@ -188,11 +187,219 @@ def claude_summarize(transcript, ep_title, show_name, api_key):
     raw = re.sub(r"```json|```", "", raw).strip()
     return json.loads(raw)
 
-# ── UI ────────────────────────────────────────────────────────────
+def generate_pdf(d, ep):
+    """用 reportlab 生成繁體中文 PDF 摘要報告"""
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.cidfonts import UnicodeCIDFont
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.units import mm
+    from reportlab.lib import colors
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, HRFlowable
+    from reportlab.lib.styles import ParagraphStyle
 
-st.title("🎙 Podcast AI 摘要")
-st.caption("輸入 Apple Podcasts / RSS / MP3 連結，自動轉錄並生成 Podket 風格摘要")
+    # 登錄字型（只需一次）
+    try:
+        pdfmetrics.getFont('STSong-Light')
+    except Exception:
+        pdfmetrics.registerFont(UnicodeCIDFont('STSong-Light'))
+    try:
+        pdfmetrics.getFont('MSung-Light')
+    except Exception:
+        pdfmetrics.registerFont(UnicodeCIDFont('MSung-Light'))
 
+    def S(size=11, bold=False, color='#222222', leading=None, indent=0):
+        font = 'MSung-Light' if bold else 'STSong-Light'
+        return ParagraphStyle('s', fontName=font, fontSize=size,
+            leading=leading or size * 1.8,
+            textColor=colors.HexColor(color),
+            leftIndent=indent)
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4,
+        leftMargin=22*mm, rightMargin=22*mm,
+        topMargin=22*mm, bottomMargin=22*mm)
+
+    HR = HRFlowable(width='100%', thickness=0.5,
+                    color=colors.HexColor('#dddddd'), spaceAfter=8, spaceBefore=6)
+    SP = Spacer(1, 6)
+
+    def section(title):
+        return [
+            Spacer(1, 8),
+            Paragraph(title, S(10, bold=True, color='#555555')),
+            HRFlowable(width='100%', thickness=0.5,
+                       color=colors.HexColor('#eeeeee'), spaceAfter=4, spaceBefore=2),
+        ]
+
+    story = []
+
+    # ── 標題區 ──────────────────────────────────────────────
+    cat = d.get('category', 'OTHER')
+    story.append(Paragraph(cat, S(9, color='#1a73e8')))
+    story.append(Spacer(1, 4))
+    story.append(Paragraph(d.get('title', ep['title']), S(17, bold=True, color='#1a1a2e', leading=26)))
+    story.append(Spacer(1, 6))
+    pub = ep.get('pub_date', '')[:16]
+    story.append(Paragraph(f"{ep['show']}  ·  {pub}", S(9, color='#888888')))
+    story.append(HR)
+
+    # ── TL;DR ────────────────────────────────────────────────
+    story += section('TL;DR')
+    story.append(Paragraph(d.get('tldr', ''), S(11, leading=22)))
+
+    # ── 重點整理 ──────────────────────────────────────────────
+    story += section('重點整理')
+    for i, pt in enumerate(d.get('key_points', []), 1):
+        story.append(Paragraph(f"{i}.  {pt}", S(11, leading=22, indent=4)))
+
+    # ── 分析亮點 / 潛在盲點 ──────────────────────────────────
+    story += section('分析亮點')
+    story.append(Paragraph(d.get('insight_strength', '—'), S(11, leading=22)))
+    story += section('潛在盲點')
+    story.append(Paragraph(d.get('insight_caveat', '—'), S(11, leading=22)))
+
+    # ── 個股 ──────────────────────────────────────────────────
+    stocks = d.get('stocks', [])
+    if stocks:
+        story += section('提及個股')
+        stance_map = {'bullish': '看多', 'bearish': '看空', 'neutral': '中性'}
+        icon_map   = {'bullish': '▲', 'bearish': '▼', 'neutral': '→'}
+        for s in stocks:
+            stance = s.get('stance', 'neutral')
+            label  = f"{icon_map.get(stance,'→')} {s['ticker']}  {s['name']}  [{stance_map.get(stance,'中性')}]"
+            story.append(Paragraph(label, S(11, bold=True, leading=20)))
+            story.append(Paragraph(s.get('reason', ''), S(10, color='#555555', leading=18, indent=8)))
+            story.append(Spacer(1, 4))
+
+    # ── 金句 ──────────────────────────────────────────────────
+    quotes = d.get('notable_quotes', [])
+    if quotes:
+        story += section('金句')
+        for q in quotes:
+            story.append(Paragraph(f'「{q}」', S(11, color='#333333', leading=22, indent=8)))
+
+    # ── 核心辯論命題 ──────────────────────────────────────────
+    if d.get('anchor_prop'):
+        story += section('核心辯論命題')
+        story.append(Paragraph(f'「{d["anchor_prop"]}」', S(12, bold=True, color='#1a1a2e', leading=24)))
+
+    # ── 總經主題 ──────────────────────────────────────────────
+    if d.get('macro_theme'):
+        story.append(Spacer(1, 10))
+        story.append(Paragraph(f'總經主題：{d["macro_theme"]}', S(9, color='#888888')))
+
+    # ── 頁尾 ──────────────────────────────────────────────────
+    story.append(Spacer(1, 14))
+    story.append(HRFlowable(width='100%', thickness=0.5,
+                             color=colors.HexColor('#cccccc'), spaceAfter=4))
+    story.append(Paragraph('由 Podcast AI 摘要工具生成', S(8, color='#aaaaaa')))
+
+    doc.build(story)
+    return buf.getvalue()
+
+
+def render_result(d, ep, transcript):
+    """渲染摘要結果（供主畫面與歷史回顧共用）"""
+    st.markdown(f'<span class="tag">{d.get("category","")}</span>', unsafe_allow_html=True)
+    st.subheader(d.get("title", ep["title"]))
+    st.caption(f"{ep['show']}  ·  {ep.get('pub_date','')[:16]}")
+
+    st.markdown('<div class="section-title">TL;DR</div>', unsafe_allow_html=True)
+    st.markdown(d.get("tldr", ""))
+
+    st.markdown('<div class="section-title">重點整理</div>', unsafe_allow_html=True)
+    for pt in d.get("key_points", []):
+        st.markdown(f"- {pt}")
+
+    col_a, col_b = st.columns(2)
+    with col_a:
+        st.markdown('<div class="section-title">✦ 分析亮點</div>', unsafe_allow_html=True)
+        st.markdown(d.get("insight_strength", "—"))
+    with col_b:
+        st.markdown('<div class="section-title">⚠ 潛在盲點</div>', unsafe_allow_html=True)
+        st.markdown(d.get("insight_caveat", "—"))
+
+    stocks = d.get("stocks", [])
+    if stocks:
+        st.markdown('<div class="section-title">提及個股</div>', unsafe_allow_html=True)
+        scols = st.columns(min(len(stocks), 4))
+        stance_icon = {"bullish": "📈", "bearish": "📉", "neutral": "➡️"}
+        for i, s in enumerate(stocks):
+            with scols[i % 4]:
+                icon = stance_icon.get(s.get("stance",""), "")
+                st.markdown(f"**{icon} {s['ticker']}**  \n{s['name']}  \n_{s['reason']}_")
+
+    quotes = d.get("notable_quotes", [])
+    if quotes:
+        st.markdown('<div class="section-title">金句</div>', unsafe_allow_html=True)
+        for q in quotes:
+            st.info(f"「{q}」")
+
+    if d.get("anchor_prop"):
+        st.markdown('<div class="section-title">核心辯論命題</div>', unsafe_allow_html=True)
+        st.warning(f"「{d['anchor_prop']}」")
+
+    if d.get("macro_theme"):
+        st.caption(f"主題：{d['macro_theme']}")
+
+    st.divider()
+
+    dl_col1, dl_col2, dl_col3 = st.columns(3)
+    report_txt = f"""節目：{ep['show']}
+集數：{ep['title']}
+
+【TL;DR】
+{d.get('tldr','')}
+
+【重點整理】
+{chr(10).join(f"  {i+1}. {p}" for i,p in enumerate(d.get('key_points',[])))}
+
+【分析亮點】
+  {d.get('insight_strength','')}
+
+【潛在盲點】
+  {d.get('insight_caveat','')}
+
+【提及個股】
+{chr(10).join(f"  {s['ticker']} {s['name']} ({s['stance']}) — {s['reason']}" for s in d.get('stocks',[]))}
+
+【核心辯論命題】
+  「{d.get('anchor_prop','')}」
+
+【主題】{d.get('macro_theme','')}
+"""
+    dl_col1.download_button(
+        "⬇ 下載摘要 TXT",
+        report_txt,
+        file_name=f"{ep['title'][:30]}_摘要.txt",
+        mime="text/plain",
+        key=f"dl_report_{ep['title'][:20]}_{id(d)}",
+    )
+    dl_col2.download_button(
+        "⬇ 下載逐字稿",
+        transcript,
+        file_name=f"{ep['title'][:30]}_逐字稿.txt",
+        mime="text/plain",
+        key=f"dl_transcript_{ep['title'][:20]}_{id(d)}",
+    )
+    try:
+        pdf_bytes = generate_pdf(d, ep)
+        dl_col3.download_button(
+            "⬇ 下載 PDF",
+            pdf_bytes,
+            file_name=f"{ep['title'][:30]}_摘要.pdf",
+            mime="application/pdf",
+            key=f"dl_pdf_{ep['title'][:20]}_{id(d)}",
+        )
+    except Exception as e:
+        dl_col3.warning(f"PDF 生成失敗：{e}")
+
+    with st.expander("查看原始 JSON"):
+        st.json(d)
+    with st.expander("查看逐字稿"):
+        st.text_area("逐字稿", transcript, height=300, key=f"ta_{id(d)}")
+
+# ── 側邊欄 ────────────────────────────────────────────────────────
 with st.sidebar:
     st.header("⚙️ 設定")
     api_key = st.text_input(
@@ -214,6 +421,26 @@ with st.sidebar:
     st.markdown("**支援格式**")
     st.markdown("- Apple Podcasts 連結\n- RSS Feed URL\n- 直接 MP3 網址")
 
+    # ── 歷史記錄 ──────────────────────────────────────────────────
+    if st.session_state.history:
+        st.divider()
+        st.markdown("**📚 分析紀錄**")
+        for i, rec in enumerate(reversed(st.session_state.history)):
+            idx = len(st.session_state.history) - 1 - i
+            label = f"🎙 {rec['ep']['show'][:14]}\n{rec['data'].get('title','')[:22]}…\n🕐 {rec['analyzed_at']}"
+            if st.button(label, key=f"hist_{idx}", use_container_width=True):
+                st.session_state.result = rec
+                st.session_state.viewing_history = True
+        if st.button("🗑 清除所有紀錄", use_container_width=True):
+            st.session_state.history = []
+            st.session_state.result = None
+            st.session_state.pop("viewing_history", None)
+            st.rerun()
+
+# ── 主畫面 ────────────────────────────────────────────────────────
+st.title("🎙 Podcast AI 摘要")
+st.caption("輸入 Apple Podcasts / RSS / MP3 連結，自動轉錄並生成 Podket 風格摘要")
+
 url_input = st.text_input(
     "Podcast 連結",
     placeholder="https://podcasts.apple.com/tw/podcast/...",
@@ -222,7 +449,6 @@ url_input = st.text_input(
 col1, col2 = st.columns([1, 3])
 run_btn = col1.button("▶ 開始分析", type="primary", use_container_width=True)
 
-# 若有多集可選
 if "all_eps" in st.session_state and st.session_state.all_eps:
     eps = st.session_state.all_eps
     options = [f"[{i+1}] {e['title']} ({e['duration']})" for i, e in enumerate(eps)]
@@ -241,8 +467,9 @@ if run_btn:
         st.error("請輸入 Podcast 連結")
         st.stop()
 
-    st.session_state.pop("result", None)
+    st.session_state.result = None
     st.session_state.pop("all_eps", None)
+    st.session_state.pop("viewing_history", None)
 
     with st.status("🔍 解析連結中...", expanded=True) as status:
         try:
@@ -268,111 +495,26 @@ if run_btn:
         st.write("🤖 Claude 分析摘要中...")
         try:
             data = claude_summarize(transcript, ep["title"], ep["show"], api_key)
-            st.session_state.result = {"data": data, "ep": ep, "transcript": transcript}
+            now = datetime.now().strftime("%m/%d %H:%M")
+            record = {"data": data, "ep": ep, "transcript": transcript, "analyzed_at": now}
+            st.session_state.result = record
+            # 存入歷史（避免重複同一集）
+            existing_titles = [r["ep"]["title"] for r in st.session_state.history]
+            if ep["title"] not in existing_titles:
+                st.session_state.history.append(record)
             status.update(label="✅ 分析完成！", state="complete", expanded=False)
         except Exception as e:
             status.update(label="分析失敗", state="error")
             st.error(f"Claude 分析失敗：{e}")
             st.stop()
 
-# ── 顯示結果 ─────────────────────────────────────────────────────
-
-if "result" in st.session_state:
-    d = st.session_state.result["data"]
-    ep = st.session_state.result["ep"]
-    transcript = st.session_state.result["transcript"]
+# ── 顯示結果 ──────────────────────────────────────────────────────
+if st.session_state.result:
+    rec = st.session_state.result
+    viewing = st.session_state.get("viewing_history", False)
 
     st.divider()
+    if viewing:
+        st.caption(f"📂 歷史紀錄  ·  分析於 {rec.get('analyzed_at','')}")
 
-    # 標題區
-    st.markdown(f'<span class="tag">{d.get("category","")}</span>', unsafe_allow_html=True)
-    st.subheader(d.get("title", ep["title"]))
-    st.caption(f"{ep['show']}  ·  {ep.get('pub_date','')[:16]}")
-
-    # TL;DR
-    st.markdown('<div class="section-title">TL;DR</div>', unsafe_allow_html=True)
-    st.markdown(d.get("tldr", ""))
-
-    # 重點整理
-    st.markdown('<div class="section-title">重點整理</div>', unsafe_allow_html=True)
-    for pt in d.get("key_points", []):
-        st.markdown(f"- {pt}")
-
-    col_a, col_b = st.columns(2)
-    with col_a:
-        st.markdown('<div class="section-title">✦ 分析亮點</div>', unsafe_allow_html=True)
-        st.markdown(d.get("insight_strength", "—"))
-    with col_b:
-        st.markdown('<div class="section-title">⚠ 潛在盲點</div>', unsafe_allow_html=True)
-        st.markdown(d.get("insight_caveat", "—"))
-
-    # 個股
-    stocks = d.get("stocks", [])
-    if stocks:
-        st.markdown('<div class="section-title">提及個股</div>', unsafe_allow_html=True)
-        scols = st.columns(len(stocks))
-        stance_icon = {"bullish": "📈", "bearish": "📉", "neutral": "➡️"}
-        for i, s in enumerate(stocks):
-            with scols[i]:
-                icon = stance_icon.get(s.get("stance",""), "")
-                st.markdown(f"**{icon} {s['ticker']}**  \n{s['name']}  \n_{s['reason']}_")
-
-    # 金句
-    quotes = d.get("notable_quotes", [])
-    if quotes:
-        st.markdown('<div class="section-title">金句</div>', unsafe_allow_html=True)
-        for q in quotes:
-            st.info(f"「{q}」")
-
-    # 辯論命題
-    if d.get("anchor_prop"):
-        st.markdown('<div class="section-title">核心辯論命題</div>', unsafe_allow_html=True)
-        st.warning(f"「{d['anchor_prop']}」")
-
-    if d.get("macro_theme"):
-        st.caption(f"主題：{d['macro_theme']}")
-
-    st.divider()
-
-    # 下載區
-    dl_col1, dl_col2 = st.columns(2)
-    report_txt = f"""節目：{ep['show']}
-集數：{ep['title']}
-
-【TL;DR】
-{d.get('tldr','')}
-
-【重點整理】
-{chr(10).join(f"  {i+1}. {p}" for i,p in enumerate(d.get('key_points',[])))}
-
-【分析亮點】
-  {d.get('insight_strength','')}
-
-【潛在盲點】
-  {d.get('insight_caveat','')}
-
-【提及個股】
-{chr(10).join(f"  {s['ticker']} {s['name']} ({s['stance']}) — {s['reason']}" for s in d.get('stocks',[]))}
-
-【核心辯論命題】
-  「{d.get('anchor_prop','')}」
-
-【主題】{d.get('macro_theme','')}
-"""
-    dl_col1.download_button(
-        "⬇ 下載摘要報告",
-        report_txt,
-        file_name=f"{ep['title'][:30]}_摘要.txt",
-        mime="text/plain",
-    )
-    dl_col2.download_button(
-        "⬇ 下載逐字稿",
-        transcript,
-        file_name=f"{ep['title'][:30]}_逐字稿.txt",
-        mime="text/plain",
-    )
-
-    with st.expander("查看原始 JSON"):
-        st.json(d)
-    with st.expander("查看逐字稿"):
-        st.text_area("逐字稿", transcript, height=300)
+    render_result(rec["data"], rec["ep"], rec["transcript"])
