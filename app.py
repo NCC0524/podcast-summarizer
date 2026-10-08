@@ -3,14 +3,6 @@ import os, re, json, tempfile, urllib.request, urllib.parse
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-# ── ffmpeg 路徑修正：用 imageio-ffmpeg 內建的 ffmpeg ─────────────
-try:
-    import imageio_ffmpeg
-    ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
-    os.environ["PATH"] = str(Path(ffmpeg_path).parent) + ":" + os.environ.get("PATH", "")
-except Exception:
-    pass
-
 st.set_page_config(
     page_title="Podcast AI 摘要",
     page_icon="🎙",
@@ -139,39 +131,18 @@ def resolve_url(url):
         raise ValueError("RSS 中找不到音檔")
     return eps[0], eps
 
-def download_audio(url, dest, progress_cb=None):
-    req = urllib.request.Request(url, headers=HEADERS)
-    with urllib.request.urlopen(req, timeout=120) as resp:
-        total = int(resp.headers.get("Content-Length", 0))
-        downloaded = 0
-        with open(dest, "wb") as f:
-            while True:
-                chunk = resp.read(65536)
-                if not chunk: break
-                f.write(chunk)
-                downloaded += len(chunk)
-                if progress_cb and total:
-                    progress_cb(downloaded / total)
-
-def transcribe(audio_path, model_size="base"):
-    import whisper
-    import imageio_ffmpeg
-    import subprocess
-
-    # 先用 imageio_ffmpeg 內建的 ffmpeg 把音檔轉成 wav
-    ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
-    wav_path = str(audio_path).rsplit(".", 1)[0] + ".wav"
-    subprocess.run(
-        [ffmpeg_exe, "-y", "-i", str(audio_path),
-         "-ar", "16000", "-ac", "1", "-f", "wav", wav_path],
-        check=True,
-        capture_output=True,
+def transcribe_assemblyai(mp3_url, api_key):
+    """使用 AssemblyAI 雲端轉錄，直接傳 URL，不需本地 ffmpeg"""
+    import assemblyai as aai
+    aai.settings.api_key = api_key
+    config = aai.TranscriptionConfig(
+        language_detection=True,   # 自動偵測語言（含中文）
     )
-
-    # Whisper 直接讀 wav，不需要呼叫系統 ffmpeg
-    model = whisper.load_model(model_size)
-    result = model.transcribe(wav_path, language="zh", verbose=False, fp16=False)
-    return result["text"].strip()
+    transcriber = aai.Transcriber(config=config)
+    transcript = transcriber.transcribe(mp3_url)
+    if transcript.status == aai.TranscriptStatus.error:
+        raise ValueError(f"AssemblyAI 轉錄失敗：{transcript.error}")
+    return transcript.text or ""
 
 def claude_summarize(transcript, ep_title, show_name, api_key):
     import anthropic
@@ -230,15 +201,15 @@ with st.sidebar:
         placeholder="sk-ant-...",
         help="前往 console.anthropic.com/settings/keys 取得"
     )
-    model_size = st.selectbox(
-        "Whisper 模型",
-        ["tiny", "base", "small", "medium"],
-        index=1,
-        help="base=快速、small=平衡、medium=中文最準（記憶體需求較高）"
+    assemblyai_key = st.text_input(
+        "AssemblyAI API Key",
+        type="password",
+        placeholder="your_assemblyai_key",
+        help="前往 app.assemblyai.com 取得（免費 100 小時/月）"
     )
     st.divider()
     st.markdown("**費用估算**")
-    st.markdown("- Whisper：免費（本地）\n- Claude：約 NT$1–3 / 集")
+    st.markdown("- AssemblyAI：免費 100小時/月\n- Claude：約 NT$1–3 / 集")
     st.divider()
     st.markdown("**支援格式**")
     st.markdown("- Apple Podcasts 連結\n- RSS Feed URL\n- 直接 MP3 網址")
@@ -263,6 +234,9 @@ if run_btn:
     if not api_key:
         st.error("請在左側填入 Anthropic API Key")
         st.stop()
+    if not assemblyai_key:
+        st.error("請在左側填入 AssemblyAI API Key")
+        st.stop()
     if not url_input.strip():
         st.error("請輸入 Podcast 連結")
         st.stop()
@@ -282,31 +256,13 @@ if run_btn:
             st.error(f"連結解析失敗：{e}")
             st.stop()
 
-        st.write("⬇️ 下載音檔中...")
-        suffix = ".mp3"
-        for ext in [".mp3", ".m4a", ".aac"]:
-            if ext in ep["url"].lower():
-                suffix = ext; break
-
-        tmp_dir = tempfile.mkdtemp()
-        audio_path = Path(tmp_dir) / f"episode{suffix}"
-        prog_bar = st.progress(0, text="下載中...")
+        st.write("🎤 AssemblyAI 雲端轉錄中...（依音檔長度約需 1–5 分鐘）")
         try:
-            download_audio(ep["url"], audio_path,
-                           progress_cb=lambda p: prog_bar.progress(p, text=f"下載中 {p*100:.0f}%"))
-            prog_bar.progress(1.0, text="下載完成 ✅")
-        except Exception as e:
-            status.update(label="下載失敗", state="error")
-            st.error(f"音檔下載失敗：{e}")
-            st.stop()
-
-        st.write(f"🎤 Whisper 轉錄中（{model_size} 模型）...")
-        try:
-            transcript = transcribe(audio_path, model_size)
+            transcript = transcribe_assemblyai(ep["url"], assemblyai_key)
             st.write(f"✅ 轉錄完成，共 {len(transcript):,} 字")
         except Exception as e:
             status.update(label="轉錄失敗", state="error")
-            st.error(f"Whisper 轉錄失敗：{e}")
+            st.error(f"轉錄失敗：{e}")
             st.stop()
 
         st.write("🤖 Claude 分析摘要中...")
