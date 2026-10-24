@@ -201,64 +201,160 @@ def claude_summarize(transcript, ep_title, show_name, api_key):
 
 def generate_pdf(d, ep):
     from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
     from reportlab.pdfbase.cidfonts import UnicodeCIDFont
     from reportlab.lib.pagesizes import A4
     from reportlab.lib.units import mm
     from reportlab.lib import colors
     from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, HRFlowable
     from reportlab.lib.styles import ParagraphStyle
-    try: pdfmetrics.getFont('STSong-Light')
-    except: pdfmetrics.registerFont(UnicodeCIDFont('STSong-Light'))
-    try: pdfmetrics.getFont('MSung-Light')
-    except: pdfmetrics.registerFont(UnicodeCIDFont('MSung-Light'))
+    import urllib.request, tempfile, os
 
-    def S(size=11, bold=False, color='#222222', leading=None, indent=0):
-        return ParagraphStyle('s',
-            fontName='MSung-Light' if bold else 'STSong-Light',
-            fontSize=size, leading=leading or size*1.8,
-            textColor=colors.HexColor(color), leftIndent=indent)
+    # ── 字型設定：搜尋系統 Noto CJK OTF，找不到退回 CID ──────────
+    FONT_REG  = 'NotoTC'
+    FONT_BOLD = 'NotoTC-Bold'
+    _registered = set(pdfmetrics.getRegisteredFontNames())
+
+    def _find_noto_otf():
+        """在常見系統路徑尋找 Noto Sans CJK TC OTF 檔"""
+        candidates_reg = [
+            '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc',
+            '/usr/share/fonts/noto-cjk/NotoSansCJKtc-Regular.otf',
+            '/usr/share/fonts/opentype/noto/NotoSansCJKtc-Regular.otf',
+            '/nix/store/*/share/fonts/opentype/noto-cjk/NotoSansCJKtc-Regular.otf',
+            '/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc',
+        ]
+        candidates_bold = [
+            '/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc',
+            '/usr/share/fonts/noto-cjk/NotoSansCJKtc-Bold.otf',
+            '/usr/share/fonts/opentype/noto/NotoSansCJKtc-Bold.otf',
+            '/nix/store/*/share/fonts/opentype/noto-cjk/NotoSansCJKtc-Bold.otf',
+            '/usr/share/fonts/truetype/noto/NotoSansCJK-Bold.ttc',
+        ]
+        import glob
+        def first_match(patterns):
+            for p in patterns:
+                hits = glob.glob(p)
+                if hits: return hits[0]
+                if os.path.exists(p): return p
+            return None
+        return first_match(candidates_reg), first_match(candidates_bold)
+
+    def _register_noto():
+        reg_path, bold_path = _find_noto_otf()
+        if not reg_path:
+            return False
+        try:
+            if FONT_REG not in _registered:
+                pdfmetrics.registerFont(TTFont(FONT_REG, reg_path))
+            if bold_path and FONT_BOLD not in _registered:
+                pdfmetrics.registerFont(TTFont(FONT_BOLD, bold_path))
+            elif not bold_path and FONT_BOLD not in _registered:
+                pdfmetrics.registerFont(TTFont(FONT_BOLD, reg_path))  # 用 regular 代替 bold
+            return True
+        except Exception:
+            return False
+
+    use_noto = _register_noto()
+    if not use_noto:
+        # 退回 CID 字型（繁體支援有限但不崩潰）
+        try:
+            if FONT_REG not in _registered:
+                pdfmetrics.registerFont(UnicodeCIDFont('STSong-Light'))
+            if FONT_BOLD not in _registered:
+                pdfmetrics.registerFont(UnicodeCIDFont('MSung-Light'))
+        except Exception:
+            pass
+        FONT_REG  = 'STSong-Light'
+        FONT_BOLD = 'MSung-Light'
+
+    def S(size=12, bold=False, color='#1a1a1a', leading=None, indent=0, space_before=0, space_after=4):
+        return ParagraphStyle(
+            name=f's_{size}_{bold}_{color}',
+            fontName=FONT_BOLD if bold else FONT_REG,
+            fontSize=size,
+            leading=leading if leading else size * 2.0,
+            textColor=colors.HexColor(color),
+            leftIndent=indent,
+            spaceBefore=space_before,
+            spaceAfter=space_after,
+            wordWrap='CJK',
+        )
 
     buf = io.BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=A4,
-        leftMargin=22*mm, rightMargin=22*mm, topMargin=22*mm, bottomMargin=22*mm)
-    HR  = HRFlowable(width='100%', thickness=0.5, color=colors.HexColor('#dddddd'), spaceAfter=8, spaceBefore=6)
+        leftMargin=25*mm, rightMargin=25*mm, topMargin=25*mm, bottomMargin=25*mm)
 
-    def section(t):
-        return [Spacer(1,8), Paragraph(t, S(10, bold=True, color='#555555')),
-                HRFlowable(width='100%', thickness=0.5, color=colors.HexColor('#eeeeee'), spaceAfter=4, spaceBefore=2)]
+    def HR(thick=0.5, col='#dddddd', before=4, after=8):
+        return HRFlowable(width='100%', thickness=thick,
+                          color=colors.HexColor(col), spaceBefore=before, spaceAfter=after)
+
+    def section_header(text):
+        return [
+            Spacer(1, 14),
+            Paragraph(text, S(10, bold=True, color='#555555', space_before=0, space_after=2)),
+            HR(thick=0.5, col='#e0e0e0', before=2, after=6),
+        ]
 
     story = []
-    story += [Paragraph(d.get('category','OTHER'), S(9, color='#1a73e8')), Spacer(1,4),
-              Paragraph(d.get('title', ep['title']), S(17, bold=True, color='#1a1a2e', leading=26)), Spacer(1,6),
-              Paragraph(f"{ep['show']}  ·  {ep.get('pub_date','')[:16]}", S(9, color='#888888')), HR]
-    story += section('TL;DR') + [Paragraph(d.get('tldr',''), S(11, leading=22))]
-    story += section('重點整理')
-    for i, pt in enumerate(d.get('key_points',[]),1):
-        story.append(Paragraph(f"{i}.  {pt}", S(11, leading=22, indent=4)))
-    story += section('分析亮點') + [Paragraph(d.get('insight_strength','—'), S(11, leading=22))]
-    story += section('潛在盲點')  + [Paragraph(d.get('insight_caveat','—'),  S(11, leading=22))]
-    stocks = d.get('stocks',[])
+
+    # ── 標題區 ──
+    story.append(Paragraph(d.get('category', 'OTHER'), S(9, color='#1a73e8', space_after=6)))
+    story.append(Paragraph(d.get('title', ep['title']), S(18, bold=True, color='#1a1a2e', leading=32, space_after=6)))
+    story.append(Paragraph(f"{ep['show']}　·　{ep.get('pub_date','')[:16]}", S(9, color='#888888', space_after=4)))
+    story.append(HR(thick=1, col='#cccccc', before=4, after=12))
+
+    # ── TL;DR ──
+    story += section_header('TL;DR')
+    story.append(Paragraph(d.get('tldr', ''), S(12, leading=26, space_after=6)))
+
+    # ── 重點整理 ──
+    story += section_header('重點整理')
+    for i, pt in enumerate(d.get('key_points', []), 1):
+        story.append(Paragraph(f"{i}．{pt}", S(12, leading=26, indent=6, space_after=4)))
+
+    # ── 分析亮點 / 潛在盲點 ──
+    story += section_header('✦ 分析亮點')
+    story.append(Paragraph(d.get('insight_strength', '—'), S(12, leading=26, space_after=6)))
+    story += section_header('⚠ 潛在盲點')
+    story.append(Paragraph(d.get('insight_caveat', '—'), S(12, leading=26, space_after=6)))
+
+    # ── 個股 ──
+    stocks = d.get('stocks', [])
     if stocks:
-        story += section('提及個股')
+        story += section_header('提及個股')
+        icons = {'bullish': '▲', 'bearish': '▼', 'neutral': '→'}
+        labels = {'bullish': '看多', 'bearish': '看空', 'neutral': '中性'}
         for s in stocks:
-            stance = s.get('stance','neutral')
-            icon = {'bullish':'▲','bearish':'▼','neutral':'→'}.get(stance,'→')
-            label_zh = {'bullish':'看多','bearish':'看空','neutral':'中性'}.get(stance,'中性')
-            story += [Paragraph(f"{icon} {s['ticker']}  {s['name']}  [{label_zh}]", S(11, bold=True, leading=20)),
-                      Paragraph(s.get('reason',''), S(10, color='#555555', leading=18, indent=8)), Spacer(1,4)]
-    quotes = d.get('notable_quotes',[])
+            stance = s.get('stance', 'neutral')
+            story.append(Paragraph(
+                f"{icons.get(stance,'→')} <b>{s['ticker']}</b>　{s['name']}　[{labels.get(stance,'中性')}]",
+                S(12, leading=24, space_after=2)))
+            story.append(Paragraph(s.get('reason', ''), S(11, color='#555555', leading=22, indent=12, space_after=8)))
+
+    # ── 金句 ──
+    quotes = d.get('notable_quotes', [])
     if quotes:
-        story += section('金句')
+        story += section_header('金句')
         for q in quotes:
-            story.append(Paragraph(f'「{q}」', S(11, color='#333333', leading=22, indent=8)))
+            story.append(Paragraph(f'「{q}」', S(12, color='#333333', leading=26, indent=10, space_after=6)))
+
+    # ── 核心命題 ──
     if d.get('anchor_prop'):
-        story += section('核心辯論命題')
-        story.append(Paragraph(f'「{d["anchor_prop"]}」', S(12, bold=True, color='#1a1a2e', leading=24)))
+        story += section_header('核心辯論命題')
+        story.append(Paragraph(f'「{d["anchor_prop"]}」',
+                                S(13, bold=True, color='#1a1a2e', leading=28, space_after=6)))
+
+    # ── 主題 ──
     if d.get('macro_theme'):
-        story += [Spacer(1,10), Paragraph(f'總經主題：{d["macro_theme"]}', S(9, color='#888888'))]
-    story += [Spacer(1,14),
-              HRFlowable(width='100%', thickness=0.5, color=colors.HexColor('#cccccc'), spaceAfter=4),
-              Paragraph('由 Podcast AI 摘要工具生成', S(8, color='#aaaaaa'))]
+        story.append(Spacer(1, 10))
+        story.append(Paragraph(f'總經主題：{d["macro_theme"]}', S(9, color='#888888', space_after=4)))
+
+    # ── 頁尾 ──
+    story.append(Spacer(1, 20))
+    story.append(HR(thick=0.5, col='#cccccc', before=0, after=4))
+    story.append(Paragraph('由 Podcast AI 摘要工具生成', S(8, color='#aaaaaa', space_after=0)))
+
     doc.build(story)
     return buf.getvalue()
 
