@@ -49,7 +49,8 @@ HEADERS = {"User-Agent": "Mozilla/5.0"}
 
 # ── Session 初始化 ─────────────────────────────────────────────────
 for k, v in [("history", []), ("result", None), ("episode_list", None),
-              ("selected_ep", None), ("show_name", ""), ("viewing_history", False)]:
+              ("selected_ep", None), ("show_name", ""), ("viewing_history", False),
+              ("favorites", [])]:
     if k not in st.session_state:
         st.session_state[k] = v
 
@@ -331,6 +332,50 @@ with st.sidebar:
     st.markdown("**費用估算**\n- AssemblyAI：免費 100小時/月\n- Claude：約 NT$1–3 / 集")
     st.divider()
     st.markdown("**支援格式**\n- Apple Podcasts 連結\n- RSS Feed URL\n- 直接 MP3 網址")
+
+    # ── 常用欄目收藏 ──────────────────────────────────────────────
+    st.divider()
+    st.markdown("**⭐ 常用欄目**")
+    fav_name = st.text_input("欄目名稱", placeholder="例：股癌、投資老手", key="fav_name_input", label_visibility="collapsed")
+    fav_url  = st.text_input("欄目連結", placeholder="Apple Podcasts / RSS 連結", key="fav_url_input", label_visibility="collapsed")
+    add_fav_btn = st.button("＋ 加入收藏", use_container_width=True)
+    if add_fav_btn:
+        name = fav_name.strip()
+        url  = fav_url.strip()
+        if name and url:
+            existing_urls = [f["url"] for f in st.session_state.favorites]
+            if url not in existing_urls:
+                st.session_state.favorites.append({"name": name, "url": url})
+                st.success(f"已加入：{name}")
+                st.rerun()
+            else:
+                st.warning("此連結已在收藏中")
+        else:
+            st.warning("請填入名稱和連結")
+
+    if st.session_state.favorites:
+        for fi, fav in enumerate(st.session_state.favorites):
+            fav_col1, fav_col2 = st.columns([5, 1])
+            with fav_col1:
+                if st.button(f"📻 {fav['name']}", key=f"fav_load_{fi}", use_container_width=True,
+                             help=fav['url']):
+                    # 點擊直接載入該欄目集數
+                    with st.spinner(f"載入 {fav['name']}…"):
+                        try:
+                            show, eps, matched = load_episode_list(fav['url'])
+                            st.session_state.episode_list = eps
+                            st.session_state.show_name = show
+                            st.session_state.result = None
+                            st.session_state.viewing_history = False
+                            st.session_state.selected_ep = eps[0] if eps else None
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"載入失敗：{e}")
+            with fav_col2:
+                if st.button("✕", key=f"fav_del_{fi}", help="移除收藏"):
+                    st.session_state.favorites.pop(fi)
+                    st.rerun()
+
     if st.session_state.history:
         st.divider()
         st.markdown("**📚 分析紀錄**")
