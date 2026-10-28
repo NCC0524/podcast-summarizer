@@ -159,10 +159,11 @@ def transcribe_assemblyai(mp3_url, api_key):
 
 def claude_summarize(transcript, ep_title, show_name, api_key):
     import anthropic
-    MAX = 15000
+    MAX = 20000
     if len(transcript) > MAX:
         transcript = transcript[:MAX] + "\n\n[...節錄...]"
-    prompt = f"""你是一個專業財經 Podcast 分析師，風格類似 Podket。請根據以下逐字稿生成一份深度摘要報告。
+    prompt = f"""你是一位頂尖的財經 Podcast 深度分析師，具備總體經濟、產業研究、股票投資的專業背景。
+請根據以下逐字稿，產出一份「專業投資人等級」的深度分析報告，不只是摘要，而是要有獨立的判斷與見解。
 
 節目：{show_name}
 集數標題：{ep_title}
@@ -174,25 +175,58 @@ def claude_summarize(transcript, ep_title, show_name, api_key):
 請用繁體中文，以 JSON 格式輸出（不要加 markdown 反引號）：
 
 {{
-  "title": "分析角度標題（一句話，能引發思考）",
+  "title": "一句話點出本集最核心的投資命題或觀點衝突，能引發思考",
   "category": "MARKETS / MACRO / SEMICON / CRYPTO / REALESTATE / OTHER 之一",
-  "tldr": "三到五句核心論點摘要，要有具體觀點",
-  "key_points": ["重點一", "重點二", "重點三"],
-  "insight_strength": "主持人分析中最值得學習的觀點（一到兩句）",
-  "insight_caveat": "主持人論點的盲點或不足（一到兩句）",
-  "stocks": [
-    {{"ticker": "代碼", "name": "公司名", "stance": "bullish/bearish/neutral", "reason": "一句話"}}
+
+  "tldr": "4～6 句話的精華摘要，必須包含：主要論點、數據或事件、結論方向。避免模糊語句。",
+
+  "key_points": [
+    "重點1：具體說明主持人的觀點與論據（2～3句）",
+    "重點2：具體說明主持人的觀點與論據（2～3句）",
+    "重點3：具體說明主持人的觀點與論據（2～3句）",
+    "重點4（若有）",
+    "重點5（若有）"
   ],
-  "anchor_prop": "最有爭議性的核心命題（一句話）",
-  "macro_theme": "本集總經或產業主題",
-  "notable_quotes": ["金句一（若有）"]
+
+  "deep_analysis": {{
+    "core_thesis": "本集核心投資論點是什麼？用2～3句清楚陳述主持人的完整論述邏輯。",
+    "supporting_evidence": ["論據1：主持人引用了哪些數據/事件/案例來支持論點", "論據2", "論據3"],
+    "counter_risks": ["風險1：若論點成立的前提條件未實現，最大的反向風險是什麼", "風險2", "風險3"],
+    "time_horizon": "本集觀點適用的時間維度（短線數週 / 中線數月 / 長線數年）",
+    "conviction_level": "HIGH / MEDIUM / LOW — 根據主持人語氣、論據充分程度判斷其信心水位"
+  }},
+
+  "actionable_insights": [
+    "行動建議1：針對散戶投資人，可以採取的具體行動或關注方向（不是廢話，要有操作性）",
+    "行動建議2",
+    "行動建議3"
+  ],
+
+  "insight_strength": "主持人分析中最值得學習的思維框架或獨特視角（2～3句，說明為何有價值）",
+  "insight_caveat": "主持人論點的主要盲點、過度樂觀/悲觀之處、或資訊不足的地方（2～3句，要具體指出）",
+
+  "stocks": [
+    {{"ticker": "代碼（若為台股加上.TW，美股直接代碼）", "name": "公司名", "stance": "bullish/bearish/neutral", "reason": "具體說明看多/看空/中性的理由，包含估值或基本面依據（1～2句）"}}
+  ],
+
+  "macro_linkage": "本集觀點與當前總體環境（利率/匯率/景氣循環）的關聯性分析（2～3句）",
+
+  "anchor_prop": "本集最具爭議性、最值得深思的核心命題（一句話，要夠犀利）",
+  "macro_theme": "本集總經或產業主題（精簡標籤，如：AI資本支出週期、台灣房市結構性問題）",
+  "notable_quotes": ["直接引用逐字稿中最有洞見或最具代表性的金句（原文）"]
 }}
 
-注意：stocks 若無明確個股回傳 []，notable_quotes 若無回傳 []，所有內容忠實反映逐字稿。"""
+重要規則：
+- stocks 若無明確個股回傳 []；notable_quotes 若無值得引用的金句回傳 []
+- deep_analysis.supporting_evidence、counter_risks、actionable_insights 至少各 2 項
+- 所有分析必須忠實反映逐字稿內容，不要捏造主持人未說過的觀點
+- 內容要有深度，避免「主持人認為市場很重要」這類廢話
+- conviction_level 要根據主持人實際語氣客觀判斷"""
+
     client = anthropic.Anthropic(api_key=api_key)
     msg = client.messages.create(
         model="claude-sonnet-4-6",
-        max_tokens=2000,
+        max_tokens=4000,
         messages=[{"role": "user", "content": prompt}]
     )
     raw = msg.content[0].text.strip()
@@ -311,13 +345,54 @@ def generate_pdf(d, ep):
     # ── 重點整理 ──
     story += section_header('重點整理')
     for i, pt in enumerate(d.get('key_points', []), 1):
-        story.append(Paragraph(f"{i}．{pt}", S(12, leading=26, indent=6, space_after=4)))
+        story.append(Paragraph(f"{i}．{pt}", S(12, leading=26, indent=6, space_after=6)))
+
+    # ── 深度分析 ──
+    da = d.get('deep_analysis', {})
+    if da:
+        story += section_header('深度分析')
+        if da.get('core_thesis'):
+            story.append(Paragraph('核心論點', S(11, bold=True, color='#444444', space_after=2)))
+            story.append(Paragraph(da['core_thesis'], S(12, leading=26, indent=6, space_after=8)))
+
+        conv = da.get('conviction_level','')
+        horiz = da.get('time_horizon','')
+        if conv or horiz:
+            meta = []
+            if conv:  meta.append(f"信心水位：{conv}")
+            if horiz: meta.append(f"時間維度：{horiz}")
+            story.append(Paragraph('　|　'.join(meta), S(10, color='#666666', space_after=8)))
+
+        evidences = da.get('supporting_evidence', [])
+        if evidences:
+            story.append(Paragraph('支撐論據', S(11, bold=True, color='#444444', space_after=2)))
+            for e in evidences:
+                story.append(Paragraph(f"・{e}", S(11, leading=24, indent=8, space_after=3)))
+
+        risks = da.get('counter_risks', [])
+        if risks:
+            story.append(Spacer(1, 6))
+            story.append(Paragraph('反向風險', S(11, bold=True, color='#c0392b', space_after=2)))
+            for r in risks:
+                story.append(Paragraph(f"・{r}", S(11, leading=24, indent=8, space_after=3)))
+
+    # ── 可操作建議 ──
+    actions = d.get('actionable_insights', [])
+    if actions:
+        story += section_header('可操作建議')
+        for i, a in enumerate(actions, 1):
+            story.append(Paragraph(f"{i}．{a}", S(12, leading=26, indent=6, space_after=6)))
 
     # ── 分析亮點 / 潛在盲點 ──
     story += section_header('✦ 分析亮點')
     story.append(Paragraph(d.get('insight_strength', '—'), S(12, leading=26, space_after=6)))
     story += section_header('⚠ 潛在盲點')
     story.append(Paragraph(d.get('insight_caveat', '—'), S(12, leading=26, space_after=6)))
+
+    # ── 總經連結 ──
+    if d.get('macro_linkage'):
+        story += section_header('總經連結')
+        story.append(Paragraph(d['macro_linkage'], S(12, leading=26, space_after=6)))
 
     # ── 個股 ──
     stocks = d.get('stocks', [])
@@ -362,11 +437,54 @@ def render_result(d, ep, transcript):
     st.markdown(f'<span class="tag">{d.get("category","")}</span>', unsafe_allow_html=True)
     st.subheader(d.get("title", ep["title"]))
     st.caption(f"{ep['show']}  ·  {ep.get('pub_date','')[:16]}")
+
+    # ── TL;DR ──
     st.markdown('<div class="section-title">TL;DR</div>', unsafe_allow_html=True)
     st.markdown(d.get("tldr",""))
-    st.markdown('<div class="section-title">重點整理</div>', unsafe_allow_html=True)
+
+    # ── 重點整理 ──
+    st.markdown('<div class="section-title">📋 重點整理</div>', unsafe_allow_html=True)
     for pt in d.get("key_points",[]):
         st.markdown(f"- {pt}")
+
+    # ── 深度分析 ──
+    da = d.get("deep_analysis", {})
+    if da:
+        st.markdown('<div class="section-title">🔬 深度分析</div>', unsafe_allow_html=True)
+        if da.get("core_thesis"):
+            st.markdown(f"**核心論點**\n\n{da['core_thesis']}")
+
+        conviction = da.get("conviction_level","")
+        horizon = da.get("time_horizon","")
+        if conviction or horizon:
+            cv_color = {"HIGH":"🟢","MEDIUM":"🟡","LOW":"🔴"}.get(conviction,"⚪")
+            meta_parts = []
+            if conviction: meta_parts.append(f"{cv_color} 信心水位：**{conviction}**")
+            if horizon:    meta_parts.append(f"⏳ 時間維度：{horizon}")
+            st.markdown("　".join(meta_parts))
+
+        ev_col, risk_col = st.columns(2)
+        with ev_col:
+            evidences = da.get("supporting_evidence",[])
+            if evidences:
+                st.markdown("**📌 支撐論據**")
+                for e in evidences:
+                    st.markdown(f"- {e}")
+        with risk_col:
+            risks = da.get("counter_risks",[])
+            if risks:
+                st.markdown("**⚡ 反向風險**")
+                for r in risks:
+                    st.markdown(f"- {r}")
+
+    # ── 可操作建議 ──
+    actions = d.get("actionable_insights",[])
+    if actions:
+        st.markdown('<div class="section-title">💡 可操作建議</div>', unsafe_allow_html=True)
+        for i, a in enumerate(actions, 1):
+            st.markdown(f"**{i}.** {a}")
+
+    # ── 分析亮點 / 盲點 ──
     col_a, col_b = st.columns(2)
     with col_a:
         st.markdown('<div class="section-title">✦ 分析亮點</div>', unsafe_allow_html=True)
@@ -374,22 +492,34 @@ def render_result(d, ep, transcript):
     with col_b:
         st.markdown('<div class="section-title">⚠ 潛在盲點</div>', unsafe_allow_html=True)
         st.markdown(d.get("insight_caveat","—"))
+
+    # ── 總經連結 ──
+    if d.get("macro_linkage"):
+        st.markdown('<div class="section-title">🌐 總經連結</div>', unsafe_allow_html=True)
+        st.markdown(d.get("macro_linkage"))
+
+    # ── 個股 ──
     stocks = d.get("stocks",[])
     if stocks:
-        st.markdown('<div class="section-title">提及個股</div>', unsafe_allow_html=True)
-        scols = st.columns(min(len(stocks),4))
+        st.markdown('<div class="section-title">📊 提及個股</div>', unsafe_allow_html=True)
+        scols = st.columns(min(len(stocks),3))
         icons = {"bullish":"📈","bearish":"📉","neutral":"➡️"}
         for i, s in enumerate(stocks):
-            with scols[i%4]:
+            with scols[i%3]:
                 st.markdown(f"**{icons.get(s.get('stance',''),'')}{s['ticker']}**  \n{s['name']}  \n_{s['reason']}_")
+
+    # ── 金句 ──
     quotes = d.get("notable_quotes",[])
     if quotes:
-        st.markdown('<div class="section-title">金句</div>', unsafe_allow_html=True)
+        st.markdown('<div class="section-title">💬 金句</div>', unsafe_allow_html=True)
         for q in quotes:
             st.info(f"「{q}」")
+
+    # ── 核心命題 ──
     if d.get("anchor_prop"):
-        st.markdown('<div class="section-title">核心辯論命題</div>', unsafe_allow_html=True)
+        st.markdown('<div class="section-title">🎯 核心辯論命題</div>', unsafe_allow_html=True)
         st.warning(f"「{d['anchor_prop']}」")
+
     if d.get("macro_theme"):
         st.caption(f"主題：{d['macro_theme']}")
     st.divider()
