@@ -209,6 +209,14 @@ def claude_summarize(transcript, ep_title, show_name, api_key):
     {{"ticker": "代碼（若為台股加上.TW，美股直接代碼）", "name": "公司名", "stance": "bullish/bearish/neutral", "reason": "具體說明看多/看空/中性的理由，包含估值或基本面依據（1～2句）"}}
   ],
 
+  "macro_data": {{
+    "fed_policy": "若逐字稿提及聯準會政策：目前利率水位、升降息預期、縮表/擴表動向（若無相關內容則填 null）",
+    "employment": "若逐字稿提及就業數據：非農就業人數、失業率趨勢、薪資增速等對市場的含義（若無則填 null）",
+    "oil": "若逐字稿提及油價：Brent/WTI 走勢、地緣政治影響、對通膨與企業成本的傳導（若無則填 null）",
+    "gold": "若逐字稿提及金價：走勢方向、驅動因素（避險/美元/實質利率）、與股市的相關性（若無則填 null）",
+    "other_macro": ["其他被提及的重要總經數據或資產價格，例如CPI、PMI、美元指數、銅價、10Y美債殖利率等（若無則回傳空陣列[]）"]
+  }},
+
   "macro_linkage": "本集觀點與當前總體環境（利率/匯率/景氣循環）的關聯性分析（2～3句）",
 
   "anchor_prop": "本集最具爭議性、最值得深思的核心命題（一句話，要夠犀利）",
@@ -218,6 +226,7 @@ def claude_summarize(transcript, ep_title, show_name, api_key):
 
 重要規則：
 - stocks 若無明確個股回傳 []；notable_quotes 若無值得引用的金句回傳 []
+- macro_data 各欄位：逐字稿有提及才填，真的完全沒提及填 null 或 []，不要捏造數據
 - deep_analysis.supporting_evidence、counter_risks、actionable_insights 至少各 2 項
 - 所有分析必須忠實反映逐字稿內容，不要捏造主持人未說過的觀點
 - 內容要有深度，避免「主持人認為市場很重要」這類廢話
@@ -242,65 +251,47 @@ def generate_pdf(d, ep):
     from reportlab.lib import colors
     from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, HRFlowable
     from reportlab.lib.styles import ParagraphStyle
-    import urllib.request, tempfile, os
+    import glob, os
 
-    # ── 字型設定：搜尋系統 Noto CJK OTF，找不到退回 CID ──────────
-    FONT_REG  = 'NotoTC'
-    FONT_BOLD = 'NotoTC-Bold'
-    _registered = set(pdfmetrics.getRegisteredFontNames())
+    # ── 字型優先順序：
+    # 1. repo 內 fonts/NotoSansTC-Regular.ttf（最佳，需手動放入 repo）
+    # 2. 系統 CJK 字型（Railway Nix 環境若有安裝）
+    # 3. MSung-Light CID 退回（section header 用英文規避亂碼）
+    FONT_REG  = 'CJKFont'
+    FONT_BOLD = 'CJKFont'
+    _reg = set(pdfmetrics.getRegisteredFontNames())
 
-    def _find_noto_otf():
-        """在常見系統路徑尋找 Noto Sans CJK TC OTF 檔"""
-        candidates_reg = [
-            '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc',
-            '/usr/share/fonts/noto-cjk/NotoSansCJKtc-Regular.otf',
-            '/usr/share/fonts/opentype/noto/NotoSansCJKtc-Regular.otf',
-            '/nix/store/*/share/fonts/opentype/noto-cjk/NotoSansCJKtc-Regular.otf',
-            '/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc',
-        ]
-        candidates_bold = [
-            '/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc',
-            '/usr/share/fonts/noto-cjk/NotoSansCJKtc-Bold.otf',
-            '/usr/share/fonts/opentype/noto/NotoSansCJKtc-Bold.otf',
-            '/nix/store/*/share/fonts/opentype/noto-cjk/NotoSansCJKtc-Bold.otf',
-            '/usr/share/fonts/truetype/noto/NotoSansCJK-Bold.ttc',
-        ]
-        import glob
-        def first_match(patterns):
-            for p in patterns:
-                hits = glob.glob(p)
-                if hits: return hits[0]
-                if os.path.exists(p): return p
-            return None
-        return first_match(candidates_reg), first_match(candidates_bold)
-
-    def _register_noto():
-        reg_path, bold_path = _find_noto_otf()
-        if not reg_path:
-            return False
-        try:
-            if FONT_REG not in _registered:
-                pdfmetrics.registerFont(TTFont(FONT_REG, reg_path))
-            if bold_path and FONT_BOLD not in _registered:
-                pdfmetrics.registerFont(TTFont(FONT_BOLD, bold_path))
-            elif not bold_path and FONT_BOLD not in _registered:
-                pdfmetrics.registerFont(TTFont(FONT_BOLD, reg_path))  # 用 regular 代替 bold
+    def _register_cjk():
+        # 1. repo 內字型（優先）
+        repo_font = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fonts', 'NotoSansTC-Regular.ttf')
+        if os.path.exists(repo_font):
+            pdfmetrics.registerFont(TTFont('CJKFont', repo_font))
             return True
-        except Exception:
-            return False
+        # 2. 系統常見路徑
+        patterns = [
+            '/usr/share/fonts/**/Noto*CJK*TC*.otf',
+            '/usr/share/fonts/**/Noto*CJK*.ttc',
+            '/usr/share/fonts/**/WenQuanYi*.ttf',
+            '/usr/share/fonts/**/*CJK*.ttf',
+        ]
+        for pat in patterns:
+            hits = glob.glob(pat, recursive=True)
+            if hits:
+                try:
+                    pdfmetrics.registerFont(TTFont('CJKFont', hits[0]))
+                    return True
+                except Exception:
+                    continue
+        return False
 
-    use_noto = _register_noto()
-    if not use_noto:
-        # 退回 CID 字型（繁體支援有限但不崩潰）
+    use_ttf = 'CJKFont' in _reg or _register_cjk()
+    if not use_ttf:
         try:
-            if FONT_REG not in _registered:
-                pdfmetrics.registerFont(UnicodeCIDFont('STSong-Light'))
-            if FONT_BOLD not in _registered:
-                pdfmetrics.registerFont(UnicodeCIDFont('MSung-Light'))
+            pdfmetrics.registerFont(UnicodeCIDFont('MSung-Light'))
+            FONT_REG = FONT_BOLD = 'MSung-Light'
         except Exception:
-            pass
-        FONT_REG  = 'STSong-Light'
-        FONT_BOLD = 'MSung-Light'
+            pdfmetrics.registerFont(UnicodeCIDFont('STSong-Light'))
+            FONT_REG = FONT_BOLD = 'STSong-Light'
 
     def S(size=12, bold=False, color='#1a1a1a', leading=None, indent=0, space_before=0, space_after=4):
         return ParagraphStyle(
@@ -342,88 +333,109 @@ def generate_pdf(d, ep):
     story += section_header('TL;DR')
     story.append(Paragraph(d.get('tldr', ''), S(12, leading=26, space_after=6)))
 
-    # ── 重點整理 ──
-    story += section_header('重點整理')
+    # ── Key Points ──
+    story += section_header('Key Points')
     for i, pt in enumerate(d.get('key_points', []), 1):
-        story.append(Paragraph(f"{i}．{pt}", S(12, leading=26, indent=6, space_after=6)))
+        story.append(Paragraph(f"{i}. {pt}", S(12, leading=26, indent=6, space_after=6)))
 
-    # ── 深度分析 ──
+    # ── Deep Analysis ──
     da = d.get('deep_analysis', {})
     if da:
-        story += section_header('深度分析')
+        story += section_header('Deep Analysis')
         if da.get('core_thesis'):
-            story.append(Paragraph('核心論點', S(11, bold=True, color='#444444', space_after=2)))
+            story.append(Paragraph('Core Thesis', S(11, bold=True, color='#444444', space_after=2)))
             story.append(Paragraph(da['core_thesis'], S(12, leading=26, indent=6, space_after=8)))
 
         conv = da.get('conviction_level','')
         horiz = da.get('time_horizon','')
         if conv or horiz:
             meta = []
-            if conv:  meta.append(f"信心水位：{conv}")
-            if horiz: meta.append(f"時間維度：{horiz}")
-            story.append(Paragraph('　|　'.join(meta), S(10, color='#666666', space_after=8)))
+            if conv:  meta.append(f"Conviction: {conv}")
+            if horiz: meta.append(f"Horizon: {horiz}")
+            story.append(Paragraph('  |  '.join(meta), S(10, color='#666666', space_after=8)))
 
         evidences = da.get('supporting_evidence', [])
         if evidences:
-            story.append(Paragraph('支撐論據', S(11, bold=True, color='#444444', space_after=2)))
+            story.append(Paragraph('Supporting Evidence', S(11, bold=True, color='#444444', space_after=2)))
             for e in evidences:
-                story.append(Paragraph(f"・{e}", S(11, leading=24, indent=8, space_after=3)))
+                story.append(Paragraph(f"- {e}", S(11, leading=24, indent=8, space_after=3)))
 
         risks = da.get('counter_risks', [])
         if risks:
             story.append(Spacer(1, 6))
-            story.append(Paragraph('反向風險', S(11, bold=True, color='#c0392b', space_after=2)))
+            story.append(Paragraph('Counter Risks', S(11, bold=True, color='#c0392b', space_after=2)))
             for r in risks:
-                story.append(Paragraph(f"・{r}", S(11, leading=24, indent=8, space_after=3)))
+                story.append(Paragraph(f"- {r}", S(11, leading=24, indent=8, space_after=3)))
 
-    # ── 可操作建議 ──
+    # ── Action Items ──
     actions = d.get('actionable_insights', [])
     if actions:
-        story += section_header('可操作建議')
+        story += section_header('Action Items')
         for i, a in enumerate(actions, 1):
-            story.append(Paragraph(f"{i}．{a}", S(12, leading=26, indent=6, space_after=6)))
+            story.append(Paragraph(f"{i}. {a}", S(12, leading=26, indent=6, space_after=6)))
 
-    # ── 分析亮點 / 潛在盲點 ──
-    story += section_header('✦ 分析亮點')
-    story.append(Paragraph(d.get('insight_strength', '—'), S(12, leading=26, space_after=6)))
-    story += section_header('⚠ 潛在盲點')
-    story.append(Paragraph(d.get('insight_caveat', '—'), S(12, leading=26, space_after=6)))
+    # ── Strengths / Blind Spots ──
+    story += section_header('Strengths')
+    story.append(Paragraph(d.get('insight_strength', '-'), S(12, leading=26, space_after=6)))
+    story += section_header('Blind Spots')
+    story.append(Paragraph(d.get('insight_caveat', '-'), S(12, leading=26, space_after=6)))
 
-    # ── 總經連結 ──
+    # ── Macro Data ──
+    md = d.get('macro_data', {})
+    macro_items = [
+        ('Fed Policy',  md.get('fed_policy')),
+        ('Employment',  md.get('employment')),
+        ('Oil Price',   md.get('oil')),
+        ('Gold Price',  md.get('gold')),
+    ]
+    others = md.get('other_macro', [])
+    has_md = any(v for _, v in macro_items) or others
+    if has_md:
+        story += section_header('Macro Data')
+        for label, val in macro_items:
+            if val:
+                story.append(Paragraph(label, S(11, bold=True, color='#444444', space_after=2)))
+                story.append(Paragraph(val, S(11, leading=24, indent=8, space_after=6)))
+        if others:
+            story.append(Paragraph('Other Data Points', S(11, bold=True, color='#444444', space_after=2)))
+            for o in others:
+                story.append(Paragraph(f"- {o}", S(11, leading=24, indent=8, space_after=3)))
+
+    # ── Macro ──
     if d.get('macro_linkage'):
-        story += section_header('總經連結')
+        story += section_header('Macro Linkage')
         story.append(Paragraph(d['macro_linkage'], S(12, leading=26, space_after=6)))
 
-    # ── 個股 ──
+    # ── Stocks ──
     stocks = d.get('stocks', [])
     if stocks:
-        story += section_header('提及個股')
-        icons = {'bullish': '▲', 'bearish': '▼', 'neutral': '→'}
-        labels = {'bullish': '看多', 'bearish': '看空', 'neutral': '中性'}
+        story += section_header('Stocks')
+        icons = {'bullish': '[+]', 'bearish': '[-]', 'neutral': '[=]'}
+        labels = {'bullish': 'Bullish', 'bearish': 'Bearish', 'neutral': 'Neutral'}
         for s in stocks:
             stance = s.get('stance', 'neutral')
             story.append(Paragraph(
-                f"{icons.get(stance,'→')} <b>{s['ticker']}</b>　{s['name']}　[{labels.get(stance,'中性')}]",
+                f"{icons.get(stance,'[=]')} {s['ticker']}  {s['name']}  [{labels.get(stance,'Neutral')}]",
                 S(12, leading=24, space_after=2)))
             story.append(Paragraph(s.get('reason', ''), S(11, color='#555555', leading=22, indent=12, space_after=8)))
 
-    # ── 金句 ──
+    # ── Quotes ──
     quotes = d.get('notable_quotes', [])
     if quotes:
-        story += section_header('金句')
+        story += section_header('Quotes')
         for q in quotes:
-            story.append(Paragraph(f'「{q}」', S(12, color='#333333', leading=26, indent=10, space_after=6)))
+            story.append(Paragraph(f'"{q}"', S(12, color='#333333', leading=26, indent=10, space_after=6)))
 
-    # ── 核心命題 ──
+    # ── Core Thesis ──
     if d.get('anchor_prop'):
-        story += section_header('核心辯論命題')
-        story.append(Paragraph(f'「{d["anchor_prop"]}」',
+        story += section_header('Core Thesis')
+        story.append(Paragraph(f'"{d["anchor_prop"]}"',
                                 S(13, bold=True, color='#1a1a2e', leading=28, space_after=6)))
 
-    # ── 主題 ──
+    # ── Theme ──
     if d.get('macro_theme'):
         story.append(Spacer(1, 10))
-        story.append(Paragraph(f'總經主題：{d["macro_theme"]}', S(9, color='#888888', space_after=4)))
+        story.append(Paragraph(f'Theme: {d["macro_theme"]}', S(9, color='#888888', space_after=4)))
 
     # ── 頁尾 ──
     story.append(Spacer(1, 20))
@@ -492,6 +504,29 @@ def render_result(d, ep, transcript):
     with col_b:
         st.markdown('<div class="section-title">⚠ 潛在盲點</div>', unsafe_allow_html=True)
         st.markdown(d.get("insight_caveat","—"))
+
+    # ── 財經數據分析 ──
+    md = d.get("macro_data", {})
+    has_macro_data = md and any([md.get("fed_policy"), md.get("employment"),
+                                  md.get("oil"), md.get("gold"),
+                                  md.get("other_macro")])
+    if has_macro_data:
+        st.markdown('<div class="section-title">📈 財經數據解析</div>', unsafe_allow_html=True)
+        macro_items = [
+            ("🏦 聯準會政策", md.get("fed_policy")),
+            ("👷 就業數據",   md.get("employment")),
+            ("🛢 油價分析",   md.get("oil")),
+            ("🥇 金價分析",   md.get("gold")),
+        ]
+        for label, val in macro_items:
+            if val:
+                with st.expander(label, expanded=True):
+                    st.markdown(val)
+        others = md.get("other_macro", [])
+        if others:
+            with st.expander("📊 其他總經數據", expanded=True):
+                for o in others:
+                    st.markdown(f"- {o}")
 
     # ── 總經連結 ──
     if d.get("macro_linkage"):
