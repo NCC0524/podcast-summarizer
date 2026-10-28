@@ -262,12 +262,36 @@ def generate_pdf(d, ep):
     FONT_BOLD = 'CJKFont'
     _reg = set(pdfmetrics.getRegisteredFontNames())
 
+    def _download_font():
+        """啟動時下載字型到 /tmp（不放進 repo，避免 build 失敗）"""
+        font_path = '/tmp/NotoSansTC-Regular.ttf'
+        if os.path.exists(font_path):
+            return font_path
+        urls = [
+            'https://cdn.jsdelivr.net/gh/googlefonts/noto-cjk@main/Sans/OTF/TraditionalChinese/NotoSansCJKtc-Regular.otf',
+            'https://github.com/googlefonts/noto-cjk/raw/main/Sans/Variable/TTF/NotoSansCJKtc-VF.ttf',
+        ]
+        for url in urls:
+            try:
+                req = urllib.request.Request(url, headers=HEADERS)
+                with urllib.request.urlopen(req, timeout=30) as r:
+                    data = r.read()
+                with open(font_path, 'wb') as f:
+                    f.write(data)
+                return font_path
+            except Exception:
+                continue
+        return None
+
     def _register_cjk():
-        # 1. repo 內字型（優先）
-        repo_font = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fonts', 'NotoSansTC-Regular.ttf')
-        if os.path.exists(repo_font):
-            pdfmetrics.registerFont(TTFont('CJKFont', repo_font))
-            return True
+        # 1. /tmp 快取或下載
+        font_path = _download_font()
+        if font_path and os.path.exists(font_path):
+            try:
+                pdfmetrics.registerFont(TTFont('CJKFont', font_path))
+                return True
+            except Exception:
+                pass
         # 2. 系統常見路徑
         patterns = [
             '/usr/share/fonts/**/Noto*CJK*TC*.otf',
